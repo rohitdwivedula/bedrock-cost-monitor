@@ -1,0 +1,10 @@
+{
+  "account_id": "<AWS_ACCOUNT_ID>",
+  "ce_region": "us-east-1",
+  "log_buckets": [
+    "<BEDROCK_INVOCATION_LOG_BUCKET_REGION_1>",
+    "<BEDROCK_INVOCATION_LOG_BUCKET_REGION_2>"
+  ],
+  "deploy_bucket": "<DEPLOY_BUCKET>",
+  "deploy_prefix": "deploy"
+}
