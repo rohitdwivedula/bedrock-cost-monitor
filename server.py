@@ -15,7 +15,7 @@ daylight-saving transition.
 import http.server, socketserver, subprocess, sqlite3, json, os, re, threading, time, sys
 import datetime as dt
 import base64, hashlib, hmac
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
 
 PORT     = int(os.environ.get("DASH_PORT", "8080"))
 BIND     = os.environ.get("DASH_BIND", "127.0.0.1")
@@ -195,17 +195,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         u = urlparse(self.path)
-        # One-shot link login: /?key=<password> sets the cookie and redirects to
-        # a clean URL. Credentials embedded in the URL itself
+        # One-shot link login: ?key=<password> sets the cookie and redirects to
+        # the same path without the key. Credentials embedded in the URL itself
         # (https://user:pass@host/) cannot be used, because browsers refuse to
         # build a fetch Request from a page URL that carries credentials, so the
         # page would load but every API call would fail.
-        if PASSWORD and u.path.rstrip("/") in ("", "/"):
-            key = (parse_qs(u.query).get("key") or [None])[0]
+        #
+        # Accepted on ANY path, not just "/", because CloudFront's
+        # DefaultRootObject rewrites "/" to "/index.html" before forwarding.
+        if PASSWORD:
+            q = parse_qs(u.query)
+            key = (q.get("key") or [None])[0]
             if key is not None and hmac.compare_digest(key, PASSWORD):
                 self._set_cookie = True
+                rest = {k: v for k, v in q.items() if k != "key"}
+                loc = (u.path or "/") + (("?" + urlencode(rest, doseq=True)) if rest else "")
                 self.send_response(302)
-                self.send_header("Location", "/")
+                self.send_header("Location", loc)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
