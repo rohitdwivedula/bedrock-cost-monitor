@@ -194,9 +194,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self):
+        u = urlparse(self.path)
+        # One-shot link login: /?key=<password> sets the cookie and redirects to
+        # a clean URL. Credentials embedded in the URL itself
+        # (https://user:pass@host/) cannot be used, because browsers refuse to
+        # build a fetch Request from a page URL that carries credentials, so the
+        # page would load but every API call would fail.
+        if PASSWORD and u.path.rstrip("/") in ("", "/"):
+            key = (parse_qs(u.query).get("key") or [None])[0]
+            if key is not None and hmac.compare_digest(key, PASSWORD):
+                self._set_cookie = True
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
         if not self._authed():
             return self._challenge()
-        u = urlparse(self.path)
         if u.path.rstrip("/") != "/api/data":
             return super().do_GET()
         q = parse_qs(u.query)
