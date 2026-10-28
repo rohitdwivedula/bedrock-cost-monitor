@@ -14,9 +14,18 @@ daylight-saving transition.
 """
 import http.server, socketserver, subprocess, sqlite3, json, os, re, threading, time, sys
 import datetime as dt
+import base64, hashlib, hmac
 from urllib.parse import urlparse, parse_qs
 
 PORT     = int(os.environ.get("DASH_PORT", "8080"))
+BIND     = os.environ.get("DASH_BIND", "127.0.0.1")
+# Auth is enforced only when DASH_PASSWORD is set, so local development needs
+# no credentials while the deployed origin does. Browsers do not attach basic
+# auth to subresource fetches, so a successful basic auth also issues a cookie,
+# which they do send, and the API accepts either.
+USERNAME = os.environ.get("DASH_USERNAME", "bedrock")
+PASSWORD = os.environ.get("DASH_PASSWORD")
+COOKIE   = "dash_auth"
 HERE     = os.path.dirname(os.path.abspath(__file__))
 DB       = os.path.join(HERE, "spend.db")
 RATES    = os.path.join(HERE, "rates.json")
@@ -129,8 +138,37 @@ def last_built():
     except OSError:
         return None
 
+def _token():
+    return hmac.new(PASSWORD.encode(), b"bedrock-dash", hashlib.sha256).hexdigest()
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw): super().__init__(*a, directory=HERE, **kw)
+
+    def _authed(self):
+        if not PASSWORD:
+            return True
+        cookies = self.headers.get("Cookie") or ""
+        for part in cookies.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == COOKIE and hmac.compare_digest(v, _token()):
+                return True
+        hdr = self.headers.get("Authorization") or ""
+        if hdr.startswith("Basic "):
+            try:
+                user, _, pw = base64.b64decode(hdr[6:]).decode().partition(":")
+            except Exception:
+                return False
+            if hmac.compare_digest(user, USERNAME) and hmac.compare_digest(pw, PASSWORD):
+                self._set_cookie = True
+                return True
+        return False
+
+    def _challenge(self):
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="bedrock-spend"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
     def log_message(self, fmt, *args):
         if "/api/" in self.path:
             sys.stderr.write("%s - %s\n" % (self.log_date_time_string(), fmt % args))
@@ -144,7 +182,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def end_headers(self):
+        # a successful basic auth issues a cookie, because browsers do not
+        # attach basic credentials to subresource fetches like /api/data
+        if getattr(self, "_set_cookie", False):
+            self._set_cookie = False
+            self.send_header("Set-Cookie",
+                f"{COOKIE}={_token()}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000")
+        if self.path.endswith((".json", ".html")) or self.path.rstrip("/") in ("", "/api/data"):
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def do_GET(self):
+        if not self._authed():
+            return self._challenge()
         u = urlparse(self.path)
         if u.path.rstrip("/") != "/api/data":
             return super().do_GET()
@@ -165,6 +216,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         })
 
     def do_POST(self):
+        if not self._authed():
+            return self._challenge()
         global _last_refresh
         if urlparse(self.path).path.rstrip("/") != "/api/refresh":
             return self._json(404, {"error": "not found"})
@@ -184,6 +237,8 @@ class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 if __name__ == "__main__":
-    with Server(("127.0.0.1", PORT), Handler) as httpd:
-        print(f"dashboard on http://127.0.0.1:{PORT}/", file=sys.stderr, flush=True)
+    with Server((BIND, PORT), Handler) as httpd:
+        print(f"dashboard on http://{BIND}:{PORT}/"
+              + ("" if PASSWORD else "  (no DASH_PASSWORD set: auth disabled)"),
+              file=sys.stderr, flush=True)
         httpd.serve_forever()
